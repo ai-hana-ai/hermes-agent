@@ -15,6 +15,16 @@ import os
 import tempfile
 import html as _html
 import re
+
+# telegramify-markdown: AST-based Markdown → MarkdownV2 conversion,
+# replacing the fragile regex-based format_message() implementation.
+try:
+    from telegramify_markdown import markdownify as _tg_markdownify
+    _HAS_TG_MD = True
+except ImportError:
+    _tg_markdownify = None  # type: ignore[assignment]
+    _HAS_TG_MD = False
+
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
@@ -4025,8 +4035,12 @@ class TelegramAdapter(BasePlatformAdapter):
         #    before the normal MarkdownV2 conversions run.
         text = _wrap_markdown_tables(text)
 
+# 0b) Use telegramify-markdown for AST-based MarkdownV2 conversion.
+        if _HAS_TG_MD:
+            return _tg_markdownify(text)
+
         # 1) Protect fenced code blocks (``` ... ```)
-        #    Per MarkdownV2 spec, \ and ` inside pre/code must be escaped.
+        #    Per MarkdownV2 spec, \\ and ` inside pre/code must be escaped.
         def _protect_fenced(m):
             raw = m.group(0)
             # Split off opening ``` (with optional language) and closing ```
