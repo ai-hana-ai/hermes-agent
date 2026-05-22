@@ -3233,54 +3233,87 @@ class BasePlatformAdapter(ABC):
                             pass
 
                 # Send the text portion
+                #  Skip standalone text when it will be delivered as a photo
+                #  caption instead (avoid duplicate message).
+                _text_already_captioned = False
+                _inline_caption = None
                 if text_content and not _tts_caption_delivered:
-                    logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
-                    _reply_anchor = _reply_anchor_for_event(event)
-                    # Mark final response messages for notification delivery.
-                    # Platform adapters that support per-message notification
-                    # control (e.g. Telegram's disable_notification) use this
-                    # flag to override silent-mode and ensure the final
-                    # response triggers a push notification.
-                    # Clone to avoid mutating the metadata shared with the
-                    # typing-indicator task (which must remain unmarked).
-                    if _thread_metadata is not None:
-                        _thread_metadata = dict(_thread_metadata)
-                        _thread_metadata["notify"] = True
-                    else:
-                        _thread_metadata = {"notify": True}
-                    result = await self._send_with_retry(
-                        chat_id=event.source.chat_id,
-                        content=text_content,
-                        reply_to=_reply_anchor,
-                        metadata=_thread_metadata,
-                    )
-                    _record_delivery(result)
+                    # Pre-compute inline caption for MEDIA:path images so the
+                    # caption rides on the photo instead of landing as a
+                    # separate text bubble. Only for single-image batches
+                    # with short text (Telegram caption limit is 1024 chars).
+                    _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+                    _local_images = []
+                    for media_path, _ in media_files:
+                        _ext = Path(media_path).suffix.lower()
+                        if _ext in _IMAGE_EXTS:
+                            _local_images.append(media_path)
+                    for file_path in local_files:
+                        if Path(file_path).suffix.lower() in _IMAGE_EXTS:
+                            _local_images.append(file_path)
+                    # Count total images that will be sent natively
+                    _total_image_count = len(_local_images) + len(images)
+                    if (_total_image_count == 1
+                            and len(text_content) <= 1024
+                            and not force_document_attachments):
+                        _text_already_captioned = True
+                        # Save caption for later (applied in the image-send block below)
+                        _inline_caption = text_content
 
-                    # Schedule auto-deletion of system-notice replies.
-                    # Detached so the handler returns immediately; errors
-                    # (permission denied, message too old) are swallowed.
-                    if (
-                        _ephemeral_ttl
-                        and _ephemeral_ttl > 0
-                        and result.success
-                        and result.message_id
-                    ):
-                        self._schedule_ephemeral_delete(
+                    if not _text_already_captioned:
+                        logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                        _reply_anchor = _reply_anchor_for_event(event)
+                        # Mark final response messages for notification delivery.
+                        # Platform adapters that support per-message notification
+                        # control (e.g. Telegram's disable_notification) use this
+                        # flag to override silent-mode and ensure the final
+                        # response triggers a push notification.
+                        # Clone to avoid mutating the metadata shared with the
+                        # typing-indicator task (which must remain unmarked).
+                        if _thread_metadata is not None:
+                            _thread_metadata = dict(_thread_metadata)
+                            _thread_metadata["notify"] = True
+                        else:
+                            _thread_metadata = {"notify": True}
+                        result = await self._send_with_retry(
                             chat_id=event.source.chat_id,
-                            message_id=result.message_id,
-                            ttl_seconds=_ephemeral_ttl,
+                            content=text_content,
+                            reply_to=_reply_anchor,
+                            metadata=_thread_metadata,
                         )
+                        _record_delivery(result)
+
+                        # Schedule auto-deletion of system-notice replies.
+                        # Detached so the handler returns immediately; errors
+                        # (permission denied, message too old) are swallowed.
+                        if (
+                            _ephemeral_ttl
+                            and _ephemeral_ttl > 0
+                            and result.success
+                            and result.message_id
+                        ):
+                            self._schedule_ephemeral_delete(
+                                chat_id=event.source.chat_id,
+                                message_id=result.message_id,
+                                ttl_seconds=_ephemeral_ttl,
+                            )
 
                 # Human-like pacing delay between text and media
                 human_delay = self._get_human_delay()
 
                 # Send extracted images as native attachments
                 if images:
+                    # When text was skipped because it will be a photo
+                    # caption, apply it to the first URL image.
+                    _imgs = list(images)
+                    if _text_already_captioned and _imgs and _inline_caption is not None:
+                        first_url, _ = _imgs[0]
+                        _imgs[0] = (first_url, _inline_caption)
                     logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
                     try:
                         await self.send_multiple_images(
                             chat_id=event.source.chat_id,
-                            images=images,
+                            images=_imgs,
                             metadata=_thread_metadata,
                             human_delay=human_delay,
                         )
@@ -3320,6 +3353,11 @@ class BasePlatformAdapter(ABC):
                 if _image_paths:
                     try:
                         _batch = [(f"file://{_quote(p)}", "") for p in _image_paths]
+                        # When text was skipped because it will be a photo
+                        # caption, apply it to the first image in the batch.
+                        if _text_already_captioned and _batch and _inline_caption is not None:
+                            first_path, _ = _batch[0]
+                            _batch[0] = (first_path, _inline_caption)
                         await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=_batch,
