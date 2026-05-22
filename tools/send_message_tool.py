@@ -891,24 +891,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         last_msg = None
         warnings = []
 
-        # When there is exactly 1 image and short text, deliver the text as
-        # the photo caption instead of a separate text bubble (avoids split
-        # messages). Non-image media always get the text sent separately.
-        _has_single_image = (
-            len(media_files) == 1
-            and os.path.splitext(media_files[0][0])[1].lower() in _IMAGE_EXTS
-            and not force_document
-        )
-        _inline_caption = (
-            formatted.strip() if (
-                _has_single_image
-                and formatted.strip()
-                and len(formatted.strip()) <= 1024
-            ) else None
-        )
-
-        # If the text will be the photo caption, skip the separate text send.
-        if formatted.strip() and _inline_caption is None:
+        if formatted.strip():
             try:
                 last_msg = await _send_telegram_message_with_retry(
                     bot,
@@ -965,13 +948,8 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     media_kwargs = dict(thread_kwargs)
                     try:
                         if ext in _IMAGE_EXTS and not force_document:
-                            # Use caption for single-image inline delivery
-                            # (text was skipped above to avoid separate bubble).
-                            _photo_kwargs = dict(media_kwargs)
-                            if _inline_caption is not None:
-                                _photo_kwargs["caption"] = _inline_caption
                             last_msg = await bot.send_photo(
-                                chat_id=int_chat_id, photo=f, **_photo_kwargs
+                                chat_id=int_chat_id, photo=f, **media_kwargs
                             )
                         elif ext in _VIDEO_EXTS:
                             last_msg = await bot.send_video(
